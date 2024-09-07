@@ -1,0 +1,3 @@
+*.csv
+logs__uniswap_v3_swaps/
+*.json
