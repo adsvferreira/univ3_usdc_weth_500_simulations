@@ -26,7 +26,7 @@ Where $\Delta p$ represents the discrepancy between the pool price after a certa
 
 This curve design aims to:
 
-- **Minimize impermanent loss (IL)** from arbitrageurs by keeping fees negligible for small price discrepancies (since arbitrage is unlikely due to associated costs exceeding the profit).
+- **Minimize impermanent loss (IL)** from arbitrageurs by keeping the fee delta negligible for small price discrepancies (since arbitrage is unlikely due to associated costs exceeding the profit).
 - **Penalize users** swapping in the direction of arbitrage for larger discrepancies, without exceeding a **2x fee cap**.
 - **Avoid deterring informed traders**, who would avoid pools with excessively high fees, thereby inadvertently penalizing uninformed traders who would be the only ones swapping in such adverse conditions.
 
