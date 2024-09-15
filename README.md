@@ -87,3 +87,7 @@ Finally, Curve 1 was selected
 - **Std Dev Price Delta Percentage:** 1.611350
 - **Min Price Delta Percentage:** 0.000000
 - **Max Price Delta Percentage:** 24.0347
+
+### Note on Code Quality
+
+The code in this repository was developed in the context of a hackathon and, as such, is quite messy. Its only goal was to function correctly for the hackathon. The code must be thoroughly refactored before being used in any other context.
