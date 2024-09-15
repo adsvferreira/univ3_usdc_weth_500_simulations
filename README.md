@@ -41,6 +41,18 @@ The data sample for this analysis consists of:
 - **Swap Event Logs** from the USDC/WETH-0.05% Uniswap V3 pool (contract address: [0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640](https://etherscan.io/address/0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640)).
 - **Blocks ranging from 20,020,000 to 20,675,000**, covering approximately 3 months of data from July 4th to September 4th, 2024. This range includes around 583k swap events.
 
+### Generated Charts
+
+![Price Delta Charts](results/price_delta_charts.png)
+
+As shown in the cumulative probability chart above, approximately 85% of the price discrepancies between the pool and Binance are below 2%, and around 70% are below 1%. This information was crucial for fine-tuning the sigmoid curve used in this model, as the main fee variations should occur below the 2% threshold for this fee model to have a noticeable impact.
+
+Based on this analysis, the following three sigmoid curves were tested:
+
+![Sigmoid Fee Model](results/sigmoid_fee_model.png)
+
+Finally, Curve 1 was selected
+
 ## Results
 
 ### Shell Output:
@@ -75,13 +87,3 @@ The data sample for this analysis consists of:
 - **Std Dev Price Delta Percentage:** 1.611350
 - **Min Price Delta Percentage:** 0.000000
 - **Max Price Delta Percentage:** 24.0347
-
-### Generated Charts
-
-![Price Delta Charts](results/price_delta_charts.png)
-
-As shown in the cumulative probability chart above, approximately 85% of the price discrepancies between the pool and Binance are below 2%, and around 70% are below 1%. This information was crucial for fine-tuning the sigmoid curve used in this model, as the main fee variations should occur below the 2% threshold for this fee model to have a noticeable impact.
-
-Based on this analysis, the following three sigmoid curves were tested:
-
-![Sigmoid Fee Model](results/sigmoid_fee_model.png)
