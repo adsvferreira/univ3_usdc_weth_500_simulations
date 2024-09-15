@@ -1,6 +1,9 @@
 """
-Methodology:
-1. Download the pool data
+Data Extraction Methodology using cryo:
+
+1. Install cryo from: https://github.com/paradigmxyz/cryo
+
+2. Run the following command to extract the data used in this analysis:
 cryo logs \
     --label uniswap_v3_swaps \
     --blocks 20_020_000: \
@@ -11,22 +14,6 @@ cryo logs \
     --topic0 0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67 \
     --rpc <RPC_URL>
 
-
-
-2. Load the pool data
-3. Calculate:
-    - swap price from event__sqrtPriceX96_f64
-    - swap fee in input token
-4. Download ETH price data
-5. Normalize time references between the two datasets
-6. Calculate:
-    - swap price in USD
-    - swap fee in USD
-    - price difference between swap price and oracle price (%)
-    - some stats about price difference (average...)
-    - total fees in USD
-7. Calculate dynamic fee curve with different c values
-8. Calculate total fees in USD for each dynamic fee curve and choose the one that maximizes the total fees
 """
 
 import glob
@@ -57,14 +44,26 @@ USDC_DECIMALS = 6
 
 CHAIN_DATA_FILE_PATH = "<CHAIN_DATA_FILE_PATH>"
 OUTPUT_FILE_PATH = "<OUTPUT_FILE_PATH>"
-MAX_DATAPOINTS = 500_000
-NEZLOBIN_C_VALUE = 0.9
+MAX_DATAPOINTS = 500_000  # Use this var to proccess only the last n entries when testing
 
-# Sigmoid S-Curve Parameters
+# Sigmoid S-Curve Parameters 1
 C0 = 0
 C1 = 1
 C2 = 600
 C3 = 0.01
+
+# Sigmoid S-Curve Parameters 2
+# C0 = 0
+# C1 = 1
+# C2 = 800
+# C3 = 0.0075
+
+# Sigmoid S-Curve Parameters 3
+# C0 = 0
+# C1 = 1
+# C2 = 1000
+# C3 = 0.005
+
 
 SHOW_PLOTS = True
 
@@ -112,34 +111,17 @@ def convert_swap_fee_to_usd(row: pd.Series) -> float:
     return swap_fee * price_usd_float
 
 
-def calculate_nezlobin_fee(row: pd.Series) -> float:
+def calculate_sigmoid_fee(row: pd.Series) -> float:
     amount0 = int(row["event__amount0_string"])
     amount1 = int(row["event__amount1_string"])
     if amount0 < 0:
-        return abs(row["dynamic_nezlobin_fee_percentage"] * amount0 * 10**-USDC_DECIMALS)
-    return abs(row["dynamic_nezlobin_fee_percentage"] * amount1 * 10**-WETH_DECIMALS)
+        return abs(row["dynamic_sigmoid_fee_percentage"] * amount0 * 10**-USDC_DECIMALS)
+    return abs(row["dynamic_sigmoid_fee_percentage"] * amount1 * 10**-WETH_DECIMALS)
 
 
-def convert_nezlobin_fee_to_usd(row: pd.Series) -> float:
+def convert_sigmoid_fee_to_usd(row: pd.Series) -> float:
     amount0 = int(row["event__amount0_string"])
-    swap_fee = row["swap_fee_nezlobin"]
-    price_usd_float = float(row["price_usd"].replace(",", ""))
-    if amount0 < 0:
-        return swap_fee  # Assuming 1 USD = 1 USDC here
-    return swap_fee * price_usd_float
-
-
-def calculate_sigmund_fee(row: pd.Series) -> float:
-    amount0 = int(row["event__amount0_string"])
-    amount1 = int(row["event__amount1_string"])
-    if amount0 < 0:
-        return abs(row["dynamic_sigmund_fee_percentage"] * amount0 * 10**-USDC_DECIMALS)
-    return abs(row["dynamic_sigmund_fee_percentage"] * amount1 * 10**-WETH_DECIMALS)
-
-
-def convert_sigmund_fee_to_usd(row: pd.Series) -> float:
-    amount0 = int(row["event__amount0_string"])
-    swap_fee = row["swap_fee_sigmund"]
+    swap_fee = row["swap_fee_sigmoid"]
     price_usd_float = float(row["price_usd"].replace(",", ""))
     if amount0 < 0:
         return swap_fee  # Assuming 1 USD = 1 USDC here
@@ -206,10 +188,27 @@ def get_binance_prices_df(new_rows: pd.DataFrame) -> pd.DataFrame:
 
 
 def calculate_abs_sig_fee_percentage(price_delta: float) -> float:
-    exponent = -C2 * (price_delta - C3)
-    # fee = C0 + C1 / (1 + np.exp(exponent))
+    exponent = C2 * (price_delta - C3)
     fee = C0 + C1 * expit(exponent)
     return fee
+
+
+def is_arb_cancelled_by_sigmoid(row):
+    condition1 = row["arb_profit"] > 0
+    condition2 = row["arb_profit_sigmoid"] <= 0
+
+    amount0 = int(row["event__amount0_string"])
+    amount1 = int(row["event__amount1_string"])
+    pool_price = row["price ETH/USD"]
+    if amount0 < 0:
+        swap_amount_usd = abs(amount0 * 10**-USDC_DECIMALS)  # assuming 1 usdc = 1 usd
+    swap_amount_usd = abs(amount1 * 10**-WETH_DECIMALS) * pool_price
+    # Assumption: A trader with a swap size >= 100,000 USD, trading in the arb direction is most likely an
+    # informed trader and will not execute the trade in case of not having profit due to hogher fees
+    condition3 = swap_amount_usd >= 100_000
+
+    # Final decision based on all conditions
+    return condition1 and condition2 and condition3
 
 
 ###################################################### MAIN ######################################################
@@ -319,64 +318,10 @@ if not new_rows.empty:
 
     processed_df["pool_price_delta_perc"] = processed_df["price ETH/USD"].pct_change() * 100
 
-    # ########## DYNAMIC NEZLOBIN FEE ##########
-
-    # TODO:
-    # 1 - Check Nezlobin Fee Calculation
-    #
-    # 2  -Add Logic for Fee = 0 if nezlobin fee > swap fee AND swap usd amount > 1_000_000 and price_delta < nezlobin_fee_usd + gas_fee_usd (calculate assuming average ct gas fee for swap) - swap not executed
-
-    # Set the first row value to 0.05% (or 0.0005 in decimal form)
-    processed_df.loc[0, "dynamic_nezlobin_fee_percentage"] = SWAP_FEE
-
-    last_computed_fee = SWAP_FEE
-
-    for i in range(1, len(processed_df)):
-        # Check if it's the first row with a given block number (TOP OF THE BLOCK)
-        if processed_df.loc[i, "block_number"] != processed_df.loc[i - 1, "block_number"]:
-            # Convert to float to ensure proper comparison
-            price_delta = float(processed_df.loc[i, "pool_price_delta_perc"])
-            amount1 = float(processed_df.loc[i, "event__amount1_string"])
-
-            # Calculate the fee for the first occurrence of the block
-            if price_delta < 0:  # AMM_PRICE > BINANCE PRICE -> ARBITRAGE DIRECTION: SELL WETH
-                if amount1 < 0:  # SELL WETH
-                    # last_computed_fee = last_computed_fee * (
-                    #     1 + NEZLOBIN_C_VALUE * abs(processed_df.loc[i, "pool_price_delta_perc"])
-                    # )  # FEE INCREASE
-                    last_computed_fee = SWAP_FEE * (1 + NEZLOBIN_C_VALUE)
-                else:
-                    # last_computed_fee = last_computed_fee * (
-                    #     1 - NEZLOBIN_C_VALUE * abs(processed_df.loc[i, "pool_price_delta_perc"])
-                    # )  # FEE DECREASE
-                    last_computed_fee = SWAP_FEE * (1 - NEZLOBIN_C_VALUE)
-            elif price_delta > 0:  # AMM_PRICE < BINANCE PRICE -> ARBITRAGE DIRECTION: BUY WETH
-                if amount1 > 0:  # BUY WETH
-                    # last_computed_fee = last_computed_fee * (
-                    #     1 + NEZLOBIN_C_VALUE * abs(processed_df.loc[i, "pool_price_delta_perc"])
-                    # )  # FEE INCREASE
-                    last_computed_fee = SWAP_FEE * (1 + NEZLOBIN_C_VALUE)
-                else:
-                    # last_computed_fee = last_computed_fee * (
-                    #     1 - NEZLOBIN_C_VALUE * abs(processed_df.loc[i, "pool_price_delta_perc"])
-                    # )  # FEE DECREASE
-                    last_computed_fee = SWAP_FEE * (1 - NEZLOBIN_C_VALUE)
-
-            # Assign the computed fee to the first row of the block
-            processed_df.loc[i, "dynamic_nezlobin_fee_percentage"] = last_computed_fee
-        else:
-            # For all subsequent rows in the same block, use the already computed fee
-            processed_df.loc[i, "dynamic_nezlobin_fee_percentage"] = last_computed_fee
-
-    processed_df["swap_fee_nezlobin"] = processed_df.apply(calculate_nezlobin_fee, axis=1)
-    processed_df["swap_fee_nezlobin_usd"] = processed_df.apply(convert_nezlobin_fee_to_usd, axis=1)
-
-    processed_df.to_csv(OUTPUT_FILE_PATH, index=False)
-
     # ########## DYNAMIC SIGMOID S-CURVE FEE ##########
 
     # # Set the first row value to 0.05% (or 0.0005 in decimal form)
-    processed_df.loc[0, "dynamic_sigmund_fee_percentage"] = SWAP_FEE
+    processed_df.loc[0, "dynamic_sigmoid_fee_percentage"] = SWAP_FEE
 
     last_computed_fee = SWAP_FEE
 
@@ -386,6 +331,8 @@ if not new_rows.empty:
             # Convert to float to ensure proper comparison
             price_delta = float(processed_df.loc[i, "price_delta_percentage"])
             abs_sig_fee_percentage = calculate_abs_sig_fee_percentage(abs(price_delta))
+            if abs_sig_fee_percentage < 0:
+                print("NEGATIVE FEE!!!!!!!", abs_sig_fee_percentage)
             amount1 = float(processed_df.loc[i, "event__amount1_string"])
 
             # Calculate the fee for the first occurrence of the block
@@ -401,13 +348,120 @@ if not new_rows.empty:
                     last_computed_fee = SWAP_FEE * (1 - abs_sig_fee_percentage)
 
             # Assign the computed fee to the first row of the block
-            processed_df.loc[i, "dynamic_sigmund_fee_percentage"] = last_computed_fee
+            processed_df.loc[i, "dynamic_sigmoid_fee_percentage"] = last_computed_fee
         else:
             # For all subsequent rows in the same block, use the already computed fee
-            processed_df.loc[i, "dynamic_sigmund_fee_percentage"] = last_computed_fee
+            processed_df.loc[i, "dynamic_sigmoid_fee_percentage"] = last_computed_fee
 
-    processed_df["swap_fee_sigmund"] = processed_df.apply(calculate_sigmund_fee, axis=1)
-    processed_df["swap_fee_sigmund_usd"] = processed_df.apply(convert_sigmund_fee_to_usd, axis=1)
+    processed_df["swap_fee_sigmoid"] = processed_df.apply(calculate_sigmoid_fee, axis=1)
+    processed_df["swap_fee_sigmoid_usd"] = processed_df.apply(convert_sigmoid_fee_to_usd, axis=1)
+
+    # ###################################################### IL CALCULATION ######################################################
+
+    # Get the first row value of 'price ETH/USD'
+    first_price = processed_df.loc[0, "price ETH/USD"]
+
+    # Calculate the ratio 'r' for each row and then calculate 'original_IL' using the formula IL = 1 - (2 * sqrt(r)) / (1 + r), where r = first_price / current_price
+    # This formula assumes that liquidity was provided in the full range and was kept in the pool for the entire analysed period
+    processed_df["original_IL_perc"] = (
+        1
+        - (2 * np.sqrt(first_price / processed_df["price ETH/USD"]))
+        / (1 + (first_price / processed_df["price ETH/USD"]))
+    ) * 100
+
+    # ###################################################### FLAT FEE ARB PROFIT ######################################################
+
+    # Convert 'event__amount1_string' to float (amount of ETH)
+    processed_df["event__amount1_string"] = pd.to_numeric(processed_df["event__amount1_string"], errors="coerce")
+
+    # Set swap fees and gas fees
+    uniswap_fee_rate = SWAP_FEE  # 0.05%
+    cex_fee_rate = 0.0001  # 0.01%
+    gas_price_gwei = 3  # Avergae gas price in gwei
+    gas_limit = 150000  # Gas limit for a swap transaction
+
+    # Function to calculate arbitrage profit with fees
+    def calculate_arb_profit_with_fees(row):
+        uniswap_price = row["price ETH/USD"]
+        cex_eth_price = float(row["price_usd"].replace(",", ""))
+        amount_eth = abs(row["event__amount1_string"]) / 10**18  # Absolute value of ETH amount
+
+        # Calculate the geometric mean pool price (modeling price impact of the trade)
+        avg_pool_price = np.sqrt(uniswap_price * cex_eth_price)
+        # avg_pool_price = uniswap_price
+
+        # Calculate fees
+        uniswap_fee = uniswap_fee_rate * avg_pool_price * amount_eth  # Uniswap fee in USD
+        cex_fee = cex_fee_rate * cex_eth_price * amount_eth  # CEX fee in USD
+
+        # Calculate gas fees in ETH and convert to USD
+        gas_fee_eth = gas_price_gwei * gas_limit * 1e-9  # Convert gas fee to ETH (1 gwei = 10^-9 ETH)
+        gas_fee_usd = gas_fee_eth * avg_pool_price  # Convert gas fee to USD using Uniswap price
+
+        # Calculate arbitrage profit after deducting fees
+        if (
+            row["dynamic_sigmoid_fee_percentage"] > SWAP_FEE
+        ):  # Swap occured in the direction of the arbitrage opportunity
+            if uniswap_price < cex_eth_price:  # Buy on Uniswap, Sell on CEX
+                arb_profit = (cex_eth_price - avg_pool_price) * amount_eth - uniswap_fee - cex_fee - gas_fee_usd
+            elif uniswap_price > cex_eth_price:  # Sell on Uniswap, Buy on CEX
+                arb_profit = (uniswap_price - avg_pool_price) * amount_eth - uniswap_fee - cex_fee - gas_fee_usd
+            else:
+                arb_profit = 0
+        else:
+            arb_profit = 0  # no arbitrage opportunity (price delta is zero)
+
+        return arb_profit
+
+    # Apply the function to each row to calculate 'arb_profit'
+    processed_df["arb_profit"] = processed_df.apply(calculate_arb_profit_with_fees, axis=1)
+
+    # ###################################################### SIGMOID FEE ARB PROFIT ######################################################
+
+    # Set swap fees and gas fees
+    cex_fee_rate = 0.0001  # 0.01%
+    gas_price_gwei = 3  # Avergae gas price in gwei
+    gas_limit = 150000  # Gas limit for a swap transaction
+
+    # Function to calculate arbitrage profit with fees
+    def calculate_arb_profit_with_sigmoid_fees(row):
+        uniswap_price = row["price ETH/USD"]
+        cex_eth_price = float(row["price_usd"].replace(",", ""))
+        amount_eth = abs(row["event__amount1_string"]) / 10**18  # Absolute value of ETH amount
+
+        sigmoid_fee_rate = row["dynamic_sigmoid_fee_percentage"]
+
+        # Calculate the geometric mean pool price (modeling price impact of the trade)
+        avg_pool_price = np.sqrt(uniswap_price * cex_eth_price)
+        # avg_pool_price = uniswap_price
+
+        # Calculate fees
+        uniswap_fee = sigmoid_fee_rate * avg_pool_price * amount_eth  # Uniswap fee in USD
+        cex_fee = cex_fee_rate * cex_eth_price * amount_eth  # CEX fee in USD
+
+        # Calculate gas fees in ETH and convert to USD
+        gas_fee_eth = gas_price_gwei * gas_limit * 1e-9  # Convert gas fee to ETH (1 gwei = 10^-9 ETH)
+        gas_fee_usd = gas_fee_eth * avg_pool_price  # Convert gas fee to USD using Uniswap price
+
+        # Calculate arbitrage profit after deducting fees
+        if (
+            row["dynamic_sigmoid_fee_percentage"] > SWAP_FEE
+        ):  # Swap occured in the direction of the arbitrage opportunity
+            if uniswap_price < cex_eth_price:  # Buy on Uniswap, Sell on CEX
+                arb_profit = (cex_eth_price - avg_pool_price) * amount_eth - uniswap_fee - cex_fee - gas_fee_usd
+            elif uniswap_price > cex_eth_price:  # Sell on Uniswap, Buy on CEX
+                arb_profit = (uniswap_price - avg_pool_price) * amount_eth - uniswap_fee - cex_fee - gas_fee_usd
+            else:
+                arb_profit = 0
+        else:
+            arb_profit = 0  # no arbitrage opportunity
+
+        return arb_profit
+
+    # Apply the function to each row to calculate 'arb_profit'
+    processed_df["arb_profit_sigmoid"] = processed_df.apply(calculate_arb_profit_with_sigmoid_fees, axis=1)
+
+    processed_df["arb_cancelled_by_sigmoid"] = processed_df.apply(is_arb_cancelled_by_sigmoid, axis=1)
 
     processed_df.to_csv(OUTPUT_FILE_PATH, index=False)
 else:
@@ -417,68 +471,56 @@ else:
 
 # ###################################################### TABLES ######################################################
 
-# pd.set_option("display.float_format", "{:.2f}".format)
-# pd.set_option("display.max_columns", 23)
 
 pd.set_option("display.max_rows", 20)
 print()
 print(processed_df.head(100))
 print()
 
-
-# Perform data analysis
-
-
 # Flat Fee
 total_swap_fee_usd = processed_df["swap_fee_usd"].sum()
+mean_il_perc = processed_df["original_IL_perc"].mean()
+median_il_perc = processed_df["original_IL_perc"].median()
 mean_swap_fee_usd = processed_df["swap_fee_usd"].mean()
 median_swap_fee_usd = processed_df["swap_fee_usd"].median()
 std_swap_fee_usd = processed_df["swap_fee_usd"].std()
 min_swap_fee_usd = processed_df["swap_fee_usd"].min()
 max_swap_fee_usd = processed_df["swap_fee_usd"].max()
+total_arb_profit = processed_df.loc[processed_df["arb_profit"] > 0, "arb_profit"].sum()
+total_arb_profit_sig = processed_df.loc[processed_df["arb_profit_sigmoid"] > 0, "arb_profit_sigmoid"].sum()
+
 
 flat_swap_fees_summary = {
     "Total Swap Fee USD": total_swap_fee_usd,
+    "Mean IL Percentage": mean_il_perc,
+    "Median IL Percentage": median_il_perc,
     "Median Swap Fee USD": median_swap_fee_usd,
     "Mean Swap Fee USD": mean_swap_fee_usd,
     "Std Dev Swap Fee USD": std_swap_fee_usd,
     "Min Swap Fee USD": min_swap_fee_usd,
     "Max Swap Fee USD": max_swap_fee_usd,
+    "Total Arb Profit": total_arb_profit,
 }
 
 
-# Nezlobin Fee
-total_swap_fee_nezlobin_usd = processed_df["swap_fee_nezlobin_usd"].sum()
-mean_swap_fee_nezlobin_usd = processed_df["swap_fee_nezlobin_usd"].mean()
-median_swap_fee_nezlobin_usd = processed_df["swap_fee_nezlobin_usd"].median()
-std_swap_fee_nezlobin_usd = processed_df["swap_fee_nezlobin_usd"].std()
-min_swap_fee_nezlobin_usd = processed_df["swap_fee_nezlobin_usd"].min()
-max_swap_fee_nezlobin_usd = processed_df["swap_fee_nezlobin_usd"].max()
+# sigmoid Fee
+total_swap_fee_sigmoid_usd = processed_df["swap_fee_sigmoid_usd"].sum()
+mean_swap_fee_sigmoid_usd = processed_df["swap_fee_sigmoid_usd"].mean()
+median_swap_fee_sigmoid_usd = processed_df["swap_fee_sigmoid_usd"].median()
+std_swap_fee_sigmoid_usd = processed_df["swap_fee_sigmoid_usd"].std()
+min_swap_fee_sigmoid_usd = processed_df["swap_fee_sigmoid_usd"].min()
+max_swap_fee_sigmoid_usd = processed_df["swap_fee_sigmoid_usd"].max()
+total_avoided_arb_trades = int(processed_df["arb_cancelled_by_sigmoid"].sum())
 
-nezlobin_swap_fees_summary = {
-    "Total Swap Fee USD": total_swap_fee_nezlobin_usd,
-    "Median Swap Fee USD": median_swap_fee_nezlobin_usd,
-    "Mean Swap Fee USD": mean_swap_fee_nezlobin_usd,
-    "Std Dev Swap Fee USD": std_swap_fee_nezlobin_usd,
-    "Min Swap Fee USD": min_swap_fee_nezlobin_usd,
-    "Max Swap Fee USD": max_swap_fee_nezlobin_usd,
-}
-
-# Sigmund Fee
-total_swap_fee_sigmund_usd = processed_df["swap_fee_sigmund_usd"].sum()
-mean_swap_fee_sigmund_usd = processed_df["swap_fee_sigmund_usd"].mean()
-median_swap_fee_sigmund_usd = processed_df["swap_fee_sigmund_usd"].median()
-std_swap_fee_sigmund_usd = processed_df["swap_fee_sigmund_usd"].std()
-min_swap_fee_sigmund_usd = processed_df["swap_fee_sigmund_usd"].min()
-max_swap_fee_sigmund_usd = processed_df["swap_fee_sigmund_usd"].max()
-
-sigmund_swap_fees_summary = {
-    "Total Swap Fee USD": total_swap_fee_sigmund_usd,
-    "Median Swap Fee USD": median_swap_fee_sigmund_usd,
-    "Mean Swap Fee USD": mean_swap_fee_sigmund_usd,
-    "Std Dev Swap Fee USD": std_swap_fee_sigmund_usd,
-    "Min Swap Fee USD": min_swap_fee_sigmund_usd,
-    "Max Swap Fee USD": max_swap_fee_sigmund_usd,
+sigmoid_swap_fees_summary = {
+    "Total Swap Fee USD": total_swap_fee_sigmoid_usd,
+    "Median Swap Fee USD": median_swap_fee_sigmoid_usd,
+    "Mean Swap Fee USD": mean_swap_fee_sigmoid_usd,
+    "Std Dev Swap Fee USD": std_swap_fee_sigmoid_usd,
+    "Min Swap Fee USD": min_swap_fee_sigmoid_usd,
+    "Max Swap Fee USD": max_swap_fee_sigmoid_usd,
+    "Total Arb Profit": total_arb_profit_sig,
+    "Total Avoided Arb Trades": total_avoided_arb_trades,
 }
 
 # Price Delta
@@ -504,14 +546,9 @@ for metric, value in flat_swap_fees_summary.items():
     print(Fore.BLUE + f"{metric}: {value:.6f}")
 print()
 
-print()
-print(Fore.GREEN + "Nezlobin Swap Fees Analysis Summary:")
-for metric, value in nezlobin_swap_fees_summary.items():
-    print(Fore.BLUE + f"{metric}: {value:.6f}")
-print()
 
-print(Fore.GREEN + "Sigmund Swap Fees Analysis Summary:")
-for metric, value in sigmund_swap_fees_summary.items():
+print(Fore.GREEN + "sigmoid Swap Fees Analysis Summary:")
+for metric, value in sigmoid_swap_fees_summary.items():
     print(Fore.BLUE + f"{metric}: {value:.6f}")
 print()
 
@@ -533,7 +570,8 @@ abs_price_delta_percentage = processed_df["price_delta_percentage"].abs()
 
 # Determine the range for the x-axis
 x_min = abs_price_delta_percentage.min()
-x_max = abs_price_delta_percentage.max()
+# x_max = abs_price_delta_percentage.max()
+x_max = 10
 
 # Create bins: 5 bins per unit on the x-axis
 bin_width = 0.2  # 1/5 unit for each bin
@@ -543,10 +581,12 @@ bins = np.arange(x_min, x_max + bin_width, bin_width)
 fig, axes = plt.subplots(1, 2, figsize=(18, 6))  # 1 row, 2 columns
 
 # First Plot: Histogram of absolute 'price_delta_percentage' with 5 bins per unit
-sns.histplot(abs_price_delta_percentage, bins=bins, kde=True, color="blue", stat="probability", ax=axes[0])
+sns.histplot(abs_price_delta_percentage, bins=bins, kde=False, color="blue", stat="probability", ax=axes[0])
 axes[0].set_xlabel("Absolute Price Delta Percentage")
 axes[0].set_ylabel("Probability")
-axes[0].set_title("Probability Distribution of Absolute Price Delta Percentage")
+axes[0].set_title("Pool/Binance Price Delta Probability Distribution")
+
+axes[0].set_xticks(np.arange(x_min, x_max + 1, 1))
 
 # Second Plot: Cumulative Probability Distribution of Absolute Price Delta Percentage
 sns.histplot(
@@ -554,7 +594,9 @@ sns.histplot(
 )
 axes[1].set_xlabel("Absolute Price Delta Percentage")
 axes[1].set_ylabel("Cumulative Probability")
-axes[1].set_title("Cumulative Probability Distribution of Absolute Price Delta Percentage")
+axes[1].set_title("Pool/Binance Cumulative Probability Distribution")
+
+axes[1].set_xticks(np.arange(x_min, x_max + 1, 1))
 
 # Adjust layout to prevent overlapping
 plt.tight_layout()
