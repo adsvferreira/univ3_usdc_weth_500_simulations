@@ -91,3 +91,8 @@ Finally, Curve 1 was selected
 ### Note on Code Quality
 
 The code in this repository was developed in the context of a hackathon and, as such, is quite messy. Its only goal was to function correctly for the hackathon. The code must be thoroughly refactored before being used in any other context.
+
+### Hook Implementation
+
+The solidity implemantation of this Uniswap V4 hook can be found in this repository:
+https://github.com/adsvferreira/sigmoid-fees-hook
